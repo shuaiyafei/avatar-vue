@@ -1,7 +1,8 @@
 /* eslint-disable */
 import Cropper from 'cropperjs';
 import Exif from 'exif-js';
-import $ from 'jquery';
+import ajax from '@/util/ajax';
+import message from '../message';
 
 export default {
     install(Vue) {
@@ -15,19 +16,33 @@ export default {
             this.cropper = new Cropper(this.preview, {
                 aspectRatio: opt.aspectRatio ? opt.aspectRatio : 1,
                 viewMode: 1,
+                dragMode: 'move',
                 background: false,
-                zoomable: false,
-                center: false
+                zoomable: true,
+                center: false,
+                zoomOnWheel: false,
+                zoomOnTouch: false,
+                wheelZoomRatio: .1,
+                cropBoxMovable: false,
+                cropBoxResizable: false,
+                autoCropArea: 1,
+                guides: false,
+                modal: true,
+                highlight: true,
+                zoom: function (e) {
+                    // console.log(e.type, e.detail.ratio);
+                },
             });
         };
         // 创建一些必要的DOM，用于图片裁剪
         Vue.prototype.createElement = function () {
             // 初始化图片为空对象
             this.preview = null;
-            let str = '<div><img id="clip_image" src="originUrl"></div><button type="button" id="cancel_clip">取消</button><button type="button" id="clip_button">确定</button>';
-            str += '<div class="crop_loading"><div class="crop_content"><div class="loadEffect"><span></span><span></span><span></span><span></span><span></span><span></span><span></span>' +
-                '<span></span></div><div class="crop_text">图片上传中</div></div></div>';
-            str += '<div class="crop_success"><div class="crop_success_text">上传成功</div></div></div>';
+            let str = '<div class="clip-container"><img id="clip_image" src="originUrl" class="clip-image"></div>' +
+                      '<p class="clip-header"><span>修改头像</span><i class="iconfont iconfont-close"></i></p>' +
+                      '<div class="load-effect"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><p>处理中...</p></div>' +
+                      '<div class="btn-container"><button type="button" class="clip-cancel">取消</button><button type="button" class="clip-button">确定</button>' +
+                      '<input type="range" min="0" max="100" step="10" @input="change" @change="change" class="clip-range" value="0"></div>';
 
             const body = document.getElementsByTagName('body')[0];
             this.reagion = document.createElement('div');
@@ -43,8 +58,14 @@ export default {
         // 初始化一些函数绑定
         Vue.prototype.initFunction = function () {
             const self = this;
-            this.clickBtn = document.getElementById('clip_button');
-            this.cancelBtn = document.getElementById('cancel_clip');
+            this.clickBtn = document.getElementsByClassName('clip-button')[0];
+            this.cancelBtn = document.getElementsByClassName('clip-cancel')[0];
+            this.cancelIcon = document.getElementsByClassName('iconfont-close')[0];
+            this.range = document.getElementsByClassName('clip-range')[0];
+            this.effect = document.getElementsByClassName('load-effect')[0] ;
+            this.preWidth = null;
+            this.room = 0;
+            this.document = document.body;
             // 确定事件
             this.addEvent(this.clickBtn, 'click', () => {
                 self.crop();
@@ -53,6 +74,16 @@ export default {
             this.addEvent(this.cancelBtn, 'click', () => {
                 self.destoried();
             });
+            this.addEvent(this.cancelIcon, 'click', () => {
+                self.destoried();
+            });
+            this.addEvent(this.range, 'input', () => {
+                self.cropper.zoom(.006 * (self.range.value - self.preWidth));
+                if (!self.range.value) {
+                    self.cropper.zoom(-10);
+                }
+                this.preWidth = self.range.value;
+            })
             // 清空input的值
             this.addEvent(this.fileObj, 'click', function () {
                 this.value = '';
@@ -64,22 +95,78 @@ export default {
             const self = this;
             this.fileObj = e.srcElement;
             const files = e.target.files || e.dataTransfer.files;
-            if (!files.length) return false; // 不是图片直接返回
-            // 调用初始化方法
-            this.initilize(opt);
+            const objType = ['png', 'PNG', 'jpg', 'JPG', 'jpeg', 'JPEG'];
+            let picFormat = null;
             // 获取图片文件资源
             this.picValue = files[0];
-            // 去获取拍照时的信息，解决拍出来的照片旋转问题
-            Exif.getData(files, function () {
-                self.Orientation = Exif.getTag(this, 'Orientation');
-            });
+            const img = document.createElement('img');
+            img.src = self.getObjectURL(self.picValue);
+            if (this.picValue.size < 1024 * 1024 * 5) {
+                const picType = this.picValue.name.split('.');
+                for(let i=0; i< objType.length; i++) {
+                    if (picType[picType.length - 1] === objType[i]) {
+                        self.picFormat = true;
+                        break;
+                    }
+                }
+                // 不是图片直接返回
+                if (!files.length) return false;
+                if (!self.picFormat) {
+                    message('只能上传png、jpg、jpeg格式的图片');
+                    return false;
+                }
+                // 调用初始化方法
+                this.initilize(opt);
+                this.originUrl = null;
+                // 去获取拍照时的信息，解决拍出来的照片旋转问题
+                Exif.getData(this.picValue, function () {
+                    self.Orientation = Exif.getTag(this, 'Orientation');
+                    if (self.Orientation && self.Orientation !== 1) {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width;
+                        let height = img.height;
+                        if (self.Orientation != "" && self.Orientation != 1) {
+                            switch (self.Orientation) {
+                                case 6://需要顺时针（向左）90度旋转
+                                    self.rotateImg(img, 'left', canvas);
+                                    break;
+                                case 8://需要逆时针（向右）90度旋转
+                                    self.rotateImg(img, 'right', canvas);
+                                    break;
+                                case 3://需要180度旋转
+                                    self.rotateImg(img, 'right', canvas);//转两次
+                                    self.rotateImg(img, 'right', canvas);
+                                    break;
+                            }
+                        }
+                        // 1000只是示例，可以根据具体的要求去设定
+                        // let scale;
+                        // if (width > 1000 || height > 1000) {
+                        //     if (width > height) {
+                        //         scale = 1000 / width;
+                        //     } else {
+                        //         scale = 1000 / height;
+                        //     }
+                        // }
+                        // canvas.width = scale * width;
+                        // canvas.height = scale * height;
+                        // let ctx = canvas.getContext('2d');
+                        // ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        let data = canvas.toDataURL('image/png', 0.1);
+                        self.effect.style.display = 'none';
+                        self.originUrl = data;
+                    } else {
+                        self.effect.style.display = 'none';
+                        self.originUrl = self.getObjectURL(self.picValue);
 
-            // 调用方法转成url格式
-            this.originUrl = this.getObjectURL(this.picValue);
-            console.log(this.cropper)
-            // 每次替换图片要重新得到新的url
-            if (this.cropper) {
-                this.cropper.replace(this.originUrl);
+                    }
+                    // 每次替换图片要重新得到新的url
+                    if (self.cropper) {
+                        self.cropper.replace(self.originUrl);
+                    }
+                });
+            } else {
+                message('图片不能超过5M');
             }
         };
         // 图片转码方法
@@ -152,24 +239,20 @@ export default {
         };
         // 图片上传
         Vue.prototype.postImg = function (data) {
-            // 这边写图片的上传
-            $.post('/api/setAvatar', {
+            ajax.post(this.path, {
                 avatar: data
             }, (response) => {
                 if (response.code === 0) {
+                    message('头像设定成功');
                     // console.log(data)
                 } else {
-                    message(data.msg);
+                    message('头像上传失败');
                 }
             }, 'json');
             const self = this;
-            document.querySelector('.crop_loading').style.display = 'block';
             window.setTimeout(() => {
-                document.querySelector('.crop_loading').style.display = 'none';
-                document.querySelector('.crop_success').style.display = 'block';
-                //裁剪完后摧毁对象
                 self.destoried();
-            }, 3000);
+            }, 300);
         };
 
         // 图片旋转
